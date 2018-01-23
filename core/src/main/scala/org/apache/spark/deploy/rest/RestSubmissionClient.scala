@@ -19,15 +19,21 @@ package org.apache.spark.deploy.rest
 
 import java.io.{DataOutputStream, FileNotFoundException}
 import java.net.{ConnectException, HttpURLConnection, SocketException, URL}
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeoutException
 import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable
+import scala.concurrent.{Await, Future}
+import scala.concurrent.duration._
 import scala.io.Source
+import scala.util.control.NonFatal
 
 import com.fasterxml.jackson.core.JsonProcessingException
-import com.google.common.base.Charsets
 
-import org.apache.spark.{Logging, SparkConf, SPARK_VERSION => sparkVersion}
+import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf, SparkException}
+import org.apache.spark.deploy.SparkApplication
+import org.apache.spark.internal.Logging
 import org.apache.spark.util.Utils
 
 /**
@@ -208,7 +214,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
     try {
       val out = new DataOutputStream(conn.getOutputStream)
       Utils.tryWithSafeFinally {
-        out.write(json.getBytes(Charsets.UTF_8))
+        out.write(json.getBytes(StandardCharsets.UTF_8))
       } {
         out.close()
       }
@@ -225,7 +231,8 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
    * Exposed for testing.
    */
   private[rest] def readResponse(connection: HttpURLConnection): SubmitRestProtocolResponse = {
-    try {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    val responseFuture = Future {
       val dataStream =
         if (connection.getResponseCode == HttpServletResponse.SC_OK) {
           connection.getInputStream
@@ -251,11 +258,19 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
           throw new SubmitRestProtocolException(
             s"Message received from server was not a response:\n${unexpected.toJson}")
       }
-    } catch {
+    }
+
+    // scalastyle:off awaitresult
+    try { Await.result(responseFuture, 10.seconds) } catch {
+      // scalastyle:on awaitresult
       case unreachable @ (_: FileNotFoundException | _: SocketException) =>
         throw new SubmitRestConnectionException("Unable to connect to server", unreachable)
       case malformed @ (_: JsonProcessingException | _: SubmitRestProtocolException) =>
         throw new SubmitRestProtocolException("Malformed response received from server", malformed)
+      case timeout: TimeoutException =>
+        throw new SubmitRestConnectionException("No response from server", timeout)
+      case NonFatal(t) =>
+        throw new SparkException("Exception while waiting for response", t)
     }
   }
 
@@ -374,7 +389,7 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
       logWarning(s"Unable to connect to server ${masterUrl}.")
       lostMasters += masterUrl
     }
-    lostMasters.size >= masters.size
+    lostMasters.size >= masters.length
   }
 }
 
@@ -384,35 +399,46 @@ private[spark] object RestSubmissionClient {
   val PROTOCOL_VERSION = "v1"
 
   /**
-   * Submit an application, assuming Spark parameters are specified through the given config.
-   * This is abstracted to its own method for testing purposes.
+   * Filter non-spark environment variables from any environment.
    */
+  private[rest] def filterSystemEnvironment(env: Map[String, String]): Map[String, String] = {
+    env.filterKeys { k =>
+      // SPARK_HOME is filtered out because it is usually wrong on the remote machine (SPARK-12345)
+      (k.startsWith("SPARK_") && k != "SPARK_ENV_LOADED" && k != "SPARK_HOME") ||
+        k.startsWith("MESOS_")
+    }
+  }
+}
+
+private[spark] class RestSubmissionClientApp extends SparkApplication {
+
+  /** Submits a request to run the application and return the response. Visible for testing. */
   def run(
       appResource: String,
       mainClass: String,
       appArgs: Array[String],
       conf: SparkConf,
-      env: Map[String, String] = sys.env): SubmitRestProtocolResponse = {
+      env: Map[String, String] = Map()): SubmitRestProtocolResponse = {
     val master = conf.getOption("spark.master").getOrElse {
       throw new IllegalArgumentException("'spark.master' must be set.")
     }
     val sparkProperties = conf.getAll.toMap
-    val environmentVariables = env.filter { case (k, _) => k.startsWith("SPARK_") }
     val client = new RestSubmissionClient(master)
     val submitRequest = client.constructSubmitRequest(
-      appResource, mainClass, appArgs, sparkProperties, environmentVariables)
+      appResource, mainClass, appArgs, sparkProperties, env)
     client.createSubmission(submitRequest)
   }
 
-  def main(args: Array[String]): Unit = {
-    if (args.size < 2) {
+  override def start(args: Array[String], conf: SparkConf): Unit = {
+    if (args.length < 2) {
       sys.error("Usage: RestSubmissionClient [app resource] [main class] [app args*]")
       sys.exit(1)
     }
     val appResource = args(0)
     val mainClass = args(1)
-    val appArgs = args.slice(2, args.size)
-    val conf = new SparkConf
-    run(appResource, mainClass, appArgs, conf)
+    val appArgs = args.slice(2, args.length)
+    val env = RestSubmissionClient.filterSystemEnvironment(sys.env)
+    run(appResource, mainClass, appArgs, conf, env)
   }
+
 }

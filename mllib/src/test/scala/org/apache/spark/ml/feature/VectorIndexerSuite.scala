@@ -19,21 +19,27 @@ package org.apache.spark.ml.feature
 
 import scala.beans.{BeanInfo, BeanProperty}
 
-import org.apache.spark.{Logging, SparkException, SparkFunSuite}
+import org.apache.spark.{SparkException, SparkFunSuite}
+import org.apache.spark.internal.Logging
 import org.apache.spark.ml.attribute._
+import org.apache.spark.ml.linalg.{SparseVector, Vector, Vectors}
 import org.apache.spark.ml.param.ParamsSuite
-import org.apache.spark.mllib.linalg.{SparseVector, Vector, Vectors}
+import org.apache.spark.ml.util.{DefaultReadWriteTest, MLTestingUtils}
 import org.apache.spark.mllib.util.MLlibTestSparkContext
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.DataFrame
 
-class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with Logging {
+class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext
+  with DefaultReadWriteTest with Logging {
 
+  import testImplicits._
   import VectorIndexerSuite.FeatureData
 
   // identical, of length 3
   @transient var densePoints1: DataFrame = _
   @transient var sparsePoints1: DataFrame = _
+  @transient var densePoints1TestInvalid: DataFrame = _
+  @transient var sparsePoints1TestInvalid: DataFrame = _
   @transient var point1maxes: Array[Double] = _
 
   // identical, of length 2
@@ -51,11 +57,19 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
       Vectors.dense(0.0, 1.0, 2.0),
       Vectors.dense(0.0, 0.0, -1.0),
       Vectors.dense(1.0, 3.0, 2.0))
+    val densePoints1SeqTestInvalid = densePoints1Seq ++ Seq(
+      Vectors.dense(10.0, 2.0, 0.0),
+      Vectors.dense(0.0, 10.0, 2.0),
+      Vectors.dense(1.0, 3.0, 10.0))
     val sparsePoints1Seq = Seq(
       Vectors.sparse(3, Array(0, 1), Array(1.0, 2.0)),
       Vectors.sparse(3, Array(1, 2), Array(1.0, 2.0)),
       Vectors.sparse(3, Array(2), Array(-1.0)),
       Vectors.sparse(3, Array(0, 1, 2), Array(1.0, 3.0, 2.0)))
+    val sparsePoints1SeqTestInvalid = sparsePoints1Seq ++ Seq(
+      Vectors.sparse(3, Array(0, 1), Array(10.0, 2.0)),
+      Vectors.sparse(3, Array(1, 2), Array(10.0, 2.0)),
+      Vectors.sparse(3, Array(0, 1, 2), Array(1.0, 3.0, 10.0)))
     point1maxes = Array(1.0, 3.0, 2.0)
 
     val densePoints2Seq = Seq(
@@ -82,11 +96,13 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
     checkPair(densePoints1Seq, sparsePoints1Seq)
     checkPair(densePoints2Seq, sparsePoints2Seq)
 
-    densePoints1 = sqlContext.createDataFrame(sc.parallelize(densePoints1Seq, 2).map(FeatureData))
-    sparsePoints1 = sqlContext.createDataFrame(sc.parallelize(sparsePoints1Seq, 2).map(FeatureData))
-    densePoints2 = sqlContext.createDataFrame(sc.parallelize(densePoints2Seq, 2).map(FeatureData))
-    sparsePoints2 = sqlContext.createDataFrame(sc.parallelize(sparsePoints2Seq, 2).map(FeatureData))
-    badPoints = sqlContext.createDataFrame(sc.parallelize(badPointsSeq, 2).map(FeatureData))
+    densePoints1 = densePoints1Seq.map(FeatureData).toDF()
+    sparsePoints1 = sparsePoints1Seq.map(FeatureData).toDF()
+    densePoints1TestInvalid = densePoints1SeqTestInvalid.map(FeatureData).toDF()
+    sparsePoints1TestInvalid = sparsePoints1SeqTestInvalid.map(FeatureData).toDF()
+    densePoints2 = densePoints2Seq.map(FeatureData).toDF()
+    sparsePoints2 = sparsePoints2Seq.map(FeatureData).toDF()
+    badPoints = badPointsSeq.map(FeatureData).toDF()
   }
 
   private def getIndexer: VectorIndexer =
@@ -99,7 +115,7 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
   }
 
   test("Cannot fit an empty DataFrame") {
-    val rdd = sqlContext.createDataFrame(sc.parallelize(Array.empty[Vector], 2).map(FeatureData))
+    val rdd = Array.empty[Vector].map(FeatureData).toSeq.toDF()
     val vectorIndexer = getIndexer
     intercept[IllegalArgumentException] {
       vectorIndexer.fit(rdd)
@@ -109,10 +125,20 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
   test("Throws error when given RDDs with different size vectors") {
     val vectorIndexer = getIndexer
     val model = vectorIndexer.fit(densePoints1) // vectors of length 3
+
+    MLTestingUtils.checkCopyAndUids(vectorIndexer, model)
+
     model.transform(densePoints1) // should work
     model.transform(sparsePoints1) // should work
-    intercept[SparkException] {
+    // If the data is local Dataset, it throws AssertionError directly.
+    intercept[AssertionError] {
       model.transform(densePoints2).collect()
+      logInfo("Did not throw error when fit, transform were called on vectors of different lengths")
+    }
+    // If the data is distributed Dataset, it throws SparkException
+    // which is the wrapper of AssertionError.
+    intercept[SparkException] {
+      model.transform(densePoints2.repartition(2)).collect()
       logInfo("Did not throw error when fit, transform were called on vectors of different lengths")
     }
     intercept[SparkException] {
@@ -153,7 +179,7 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
         // Chose correct categorical features
         assert(categoryMaps.keys.toSet === categoricalFeatures)
         val transformed = model.transform(data).select("indexed")
-        val indexedRDD: RDD[Vector] = transformed.map(_.getAs[Vector](0))
+        val indexedRDD: RDD[Vector] = transformed.rdd.map(_.getAs[Vector](0))
         val featureAttrs = AttributeGroup.fromStructField(transformed.schema("indexed"))
         assert(featureAttrs.name === "indexed")
         assert(featureAttrs.attributes.get.length === model.numFeatures)
@@ -205,12 +231,40 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
     checkCategoryMaps(densePoints2, maxCategories = 2, categoricalFeatures = Set(1, 3))
   }
 
+  test("handle invalid") {
+    for ((points, pointsTestInvalid) <- Seq((densePoints1, densePoints1TestInvalid),
+      (sparsePoints1, sparsePoints1TestInvalid))) {
+      val vectorIndexer = getIndexer.setMaxCategories(4).setHandleInvalid("error")
+      val model = vectorIndexer.fit(points)
+      intercept[SparkException] {
+        model.transform(pointsTestInvalid).collect()
+      }
+      val vectorIndexer1 = getIndexer.setMaxCategories(4).setHandleInvalid("skip")
+      val model1 = vectorIndexer1.fit(points)
+      val invalidTransformed1 = model1.transform(pointsTestInvalid).select("indexed")
+        .collect().map(_(0))
+      val transformed1 = model1.transform(points).select("indexed").collect().map(_(0))
+      assert(transformed1 === invalidTransformed1)
+
+      val vectorIndexer2 = getIndexer.setMaxCategories(4).setHandleInvalid("keep")
+      val model2 = vectorIndexer2.fit(points)
+      val invalidTransformed2 = model2.transform(pointsTestInvalid).select("indexed")
+        .collect().map(_(0))
+      assert(invalidTransformed2 === transformed1 ++ Array(
+        Vectors.dense(2.0, 2.0, 0.0),
+        Vectors.dense(0.0, 4.0, 2.0),
+        Vectors.dense(1.0, 3.0, 3.0))
+      )
+    }
+  }
+
   test("Maintain sparsity for sparse vectors") {
     def checkSparsity(data: DataFrame, maxCategories: Int): Unit = {
       val points = data.collect().map(_.getAs[Vector](0))
       val vectorIndexer = getIndexer.setMaxCategories(maxCategories)
       val model = vectorIndexer.fit(data)
-      val indexedPoints = model.transform(data).select("indexed").map(_.getAs[Vector](0)).collect()
+      val indexedPoints =
+        model.transform(data).select("indexed").rdd.map(_.getAs[Vector](0)).collect()
       points.zip(indexedPoints).foreach {
         case (orig: SparseVector, indexed: SparseVector) =>
           assert(orig.indices.length == indexed.indices.length)
@@ -245,6 +299,23 @@ class VectorIndexerSuite extends SparkFunSuite with MLlibTestSparkContext with L
           // TODO: Once input features marked as categorical are handled correctly, check that here.
       }
     }
+  }
+
+  test("VectorIndexer read/write") {
+    val t = new VectorIndexer()
+      .setInputCol("myInputCol")
+      .setOutputCol("myOutputCol")
+      .setMaxCategories(30)
+    testDefaultReadWrite(t)
+  }
+
+  test("VectorIndexerModel read/write") {
+    val categoryMaps = Map(0 -> Map(0.0 -> 0, 1.0 -> 1), 1 -> Map(0.0 -> 0, 1.0 -> 1,
+      2.0 -> 2, 3.0 -> 3), 2 -> Map(0.0 -> 0, -1.0 -> 1, 2.0 -> 2))
+    val instance = new VectorIndexerModel("myVectorIndexerModel", 3, categoryMaps)
+    val newInstance = testDefaultReadWrite(instance)
+    assert(newInstance.numFeatures === instance.numFeatures)
+    assert(newInstance.categoryMaps === instance.categoryMaps)
   }
 }
 

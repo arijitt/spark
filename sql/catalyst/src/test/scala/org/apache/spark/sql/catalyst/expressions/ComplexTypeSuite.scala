@@ -18,9 +18,9 @@
 package org.apache.spark.sql.catalyst.expressions
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnresolvedExtractValue
 import org.apache.spark.sql.catalyst.dsl.expressions._
+import org.apache.spark.sql.catalyst.expressions.codegen.CodegenContext
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -52,6 +52,9 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(GetArrayItem(array, nullInt), null)
     checkEvaluation(GetArrayItem(nullArray, nullInt), null)
 
+    val nonNullArray = Literal.create(Seq(1), ArrayType(IntegerType, false))
+    checkEvaluation(GetArrayItem(nonNullArray, Literal(0)), 1)
+
     val nestedArray = Literal.create(Seq(Seq(1)), ArrayType(ArrayType(IntegerType)))
     checkEvaluation(GetArrayItem(nestedArray, Literal(0)), Seq(1))
   }
@@ -67,6 +70,9 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(GetMapValue(nullMap, nullString), null)
     checkEvaluation(GetMapValue(map, nullString), null)
 
+    val nonNullMap = Literal.create(Map("a" -> 1), MapType(StringType, IntegerType, false))
+    checkEvaluation(GetMapValue(nonNullMap, Literal("a")), 1)
+
     val nestedMap = Literal.create(Map("a" -> Map("b" -> "c")), MapType(StringType, typeM))
     checkEvaluation(GetMapValue(nestedMap, Literal("a")), Map("b" -> "c"))
   }
@@ -79,8 +85,8 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
     def getStructField(expr: Expression, fieldName: String): GetStructField = {
       expr.dataType match {
         case StructType(fields) =>
-          val field = fields.find(_.name == fieldName).get
-          GetStructField(expr, field, fields.indexOf(field))
+          val index = fields.indexWhere(_.name == fieldName)
+          GetStructField(expr, index)
       }
     }
 
@@ -102,15 +108,16 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
   }
 
   test("GetArrayStructFields") {
-    val typeAS = ArrayType(StructType(StructField("a", IntegerType) :: Nil))
+    val typeAS = ArrayType(StructType(StructField("a", IntegerType, false) :: Nil))
+    val typeNullAS = ArrayType(StructType(StructField("a", IntegerType) :: Nil))
     val arrayStruct = Literal.create(Seq(create_row(1)), typeAS)
-    val nullArrayStruct = Literal.create(null, typeAS)
+    val nullArrayStruct = Literal.create(null, typeNullAS)
 
     def getArrayStructFields(expr: Expression, fieldName: String): GetArrayStructFields = {
       expr.dataType match {
         case ArrayType(StructType(fields), containsNull) =>
           val field = fields.find(_.name == fieldName).get
-          GetArrayStructFields(expr, field, fields.indexOf(field), containsNull)
+          GetArrayStructFields(expr, field, fields.indexOf(field), fields.length, containsNull)
       }
     }
 
@@ -121,17 +128,62 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
   test("CreateArray") {
     val intSeq = Seq(5, 10, 15, 20, 25)
     val longSeq = intSeq.map(_.toLong)
+    val byteSeq = intSeq.map(_.toByte)
     val strSeq = intSeq.map(_.toString)
     checkEvaluation(CreateArray(intSeq.map(Literal(_))), intSeq, EmptyRow)
     checkEvaluation(CreateArray(longSeq.map(Literal(_))), longSeq, EmptyRow)
+    checkEvaluation(CreateArray(byteSeq.map(Literal(_))), byteSeq, EmptyRow)
     checkEvaluation(CreateArray(strSeq.map(Literal(_))), strSeq, EmptyRow)
 
     val intWithNull = intSeq.map(Literal(_)) :+ Literal.create(null, IntegerType)
     val longWithNull = longSeq.map(Literal(_)) :+ Literal.create(null, LongType)
+    val byteWithNull = byteSeq.map(Literal(_)) :+ Literal.create(null, ByteType)
     val strWithNull = strSeq.map(Literal(_)) :+ Literal.create(null, StringType)
     checkEvaluation(CreateArray(intWithNull), intSeq :+ null, EmptyRow)
     checkEvaluation(CreateArray(longWithNull), longSeq :+ null, EmptyRow)
+    checkEvaluation(CreateArray(byteWithNull), byteSeq :+ null, EmptyRow)
     checkEvaluation(CreateArray(strWithNull), strSeq :+ null, EmptyRow)
+    checkEvaluation(CreateArray(Literal.create(null, IntegerType) :: Nil), null :: Nil)
+  }
+
+  test("CreateMap") {
+    def interlace(keys: Seq[Literal], values: Seq[Literal]): Seq[Literal] = {
+      keys.zip(values).flatMap { case (k, v) => Seq(k, v) }
+    }
+
+    def createMap(keys: Seq[Any], values: Seq[Any]): Map[Any, Any] = {
+      // catalyst map is order-sensitive, so we create ListMap here to preserve the elements order.
+      scala.collection.immutable.ListMap(keys.zip(values): _*)
+    }
+
+    val intSeq = Seq(5, 10, 15, 20, 25)
+    val longSeq = intSeq.map(_.toLong)
+    val strSeq = intSeq.map(_.toString)
+    checkEvaluation(CreateMap(Nil), Map.empty)
+    checkEvaluation(
+      CreateMap(interlace(intSeq.map(Literal(_)), longSeq.map(Literal(_)))),
+      createMap(intSeq, longSeq))
+    checkEvaluation(
+      CreateMap(interlace(strSeq.map(Literal(_)), longSeq.map(Literal(_)))),
+      createMap(strSeq, longSeq))
+    checkEvaluation(
+      CreateMap(interlace(longSeq.map(Literal(_)), strSeq.map(Literal(_)))),
+      createMap(longSeq, strSeq))
+
+    val strWithNull = strSeq.drop(1).map(Literal(_)) :+ Literal.create(null, StringType)
+    checkEvaluation(
+      CreateMap(interlace(intSeq.map(Literal(_)), strWithNull)),
+      createMap(intSeq, strWithNull.map(_.value)))
+    intercept[RuntimeException] {
+      checkEvaluationWithoutCodegen(
+        CreateMap(interlace(strWithNull, intSeq.map(Literal(_)))),
+        null, null)
+    }
+    intercept[RuntimeException] {
+      checkEvalutionWithUnsafeProjection(
+        CreateMap(interlace(strWithNull, intSeq.map(Literal(_)))),
+        null, null)
+    }
   }
 
   test("CreateStruct") {
@@ -139,26 +191,20 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
     val c1 = 'a.int.at(0)
     val c3 = 'c.int.at(2)
     checkEvaluation(CreateStruct(Seq(c1, c3)), create_row(1, 3), row)
+    checkEvaluation(CreateStruct(Literal.create(null, LongType) :: Nil), create_row(null))
   }
 
   test("CreateNamedStruct") {
-    val row = InternalRow(1, 2, 3)
+    val row = create_row(1, 2, 3)
     val c1 = 'a.int.at(0)
     val c3 = 'c.int.at(2)
-    checkEvaluation(CreateNamedStruct(Seq("a", c1, "b", c3)), InternalRow(1, 3), row)
-  }
-
-  test("CreateNamedStruct with literal field") {
-    val row = InternalRow(1, 2, 3)
-    val c1 = 'a.int.at(0)
+    checkEvaluation(CreateNamedStruct(Seq("a", c1, "b", c3)), create_row(1, 3), row)
     checkEvaluation(CreateNamedStruct(Seq("a", c1, "b", "y")),
-      InternalRow(1, UTF8String.fromString("y")), row)
-  }
-
-  test("CreateNamedStruct from all literal fields") {
-    checkEvaluation(
-      CreateNamedStruct(Seq("a", "x", "b", 2.0)),
-      InternalRow(UTF8String.fromString("x"), 2.0), InternalRow.empty)
+      create_row(1, UTF8String.fromString("y")), row)
+    checkEvaluation(CreateNamedStruct(Seq("a", "x", "b", 2.0)),
+      create_row(UTF8String.fromString("x"), 2.0))
+    checkEvaluation(CreateNamedStruct(Seq("a", Literal.create(null, IntegerType))),
+      create_row(null))
   }
 
   test("test dsl for complex type") {
@@ -170,14 +216,12 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
       "b", create_row(Map("a" -> "b")))
     checkEvaluation(quickResolve('c.array(StringType).at(0).getItem(1)),
       "b", create_row(Seq("a", "b")))
-    checkEvaluation(quickResolve('c.struct(StructField("a", IntegerType)).at(0).getField("a")),
+    checkEvaluation(quickResolve('c.struct('a.int).at(0).getField("a")),
       1, create_row(create_row(1)))
   }
 
   test("error message of ExtractValue") {
     val structType = StructType(StructField("a", StringType, true) :: Nil)
-    val arrayStructType = ArrayType(structType)
-    val arrayType = ArrayType(StringType)
     val otherType = StringType
 
     def checkErrorMessage(
@@ -194,8 +238,72 @@ class ComplexTypeSuite extends SparkFunSuite with ExpressionEvalHelper {
     }
 
     checkErrorMessage(structType, IntegerType, "Field name should be String Literal")
-    checkErrorMessage(arrayStructType, BooleanType, "Field name should be String Literal")
-    checkErrorMessage(arrayType, StringType, "Array index should be integral type")
     checkErrorMessage(otherType, StringType, "Can't extract value from")
+  }
+
+  test("ensure to preserve metadata") {
+    val metadata = new MetadataBuilder()
+      .putString("key", "value")
+      .build()
+
+    def checkMetadata(expr: Expression): Unit = {
+      assert(expr.dataType.asInstanceOf[StructType]("a").metadata === metadata)
+      assert(expr.dataType.asInstanceOf[StructType]("b").metadata === Metadata.empty)
+    }
+
+    val a = AttributeReference("a", IntegerType, metadata = metadata)()
+    val b = AttributeReference("b", IntegerType)()
+    checkMetadata(CreateStruct(Seq(a, b)))
+    checkMetadata(CreateNamedStruct(Seq("a", a, "b", b)))
+    checkMetadata(CreateNamedStructUnsafe(Seq("a", a, "b", b)))
+  }
+
+  test("StringToMap") {
+    val expectedDataType = MapType(StringType, StringType, valueContainsNull = true)
+    assert(new StringToMap("").dataType === expectedDataType)
+
+    val s0 = Literal("a:1,b:2,c:3")
+    val m0 = Map("a" -> "1", "b" -> "2", "c" -> "3")
+    checkEvaluation(new StringToMap(s0), m0)
+
+    val s1 = Literal("a: ,b:2")
+    val m1 = Map("a" -> " ", "b" -> "2")
+    checkEvaluation(new StringToMap(s1), m1)
+
+    val s2 = Literal("a=1,b=2,c=3")
+    val m2 = Map("a" -> "1", "b" -> "2", "c" -> "3")
+    checkEvaluation(StringToMap(s2, Literal(","), Literal("=")), m2)
+
+    val s3 = Literal("")
+    val m3 = Map[String, String]("" -> null)
+    checkEvaluation(StringToMap(s3, Literal(","), Literal("=")), m3)
+
+    val s4 = Literal("a:1_b:2_c:3")
+    val m4 = Map("a" -> "1", "b" -> "2", "c" -> "3")
+    checkEvaluation(new StringToMap(s4, Literal("_")), m4)
+
+    val s5 = Literal("a")
+    val m5 = Map("a" -> null)
+    checkEvaluation(new StringToMap(s5), m5)
+
+    // arguments checking
+    assert(new StringToMap(Literal("a:1,b:2,c:3")).checkInputDataTypes().isSuccess)
+    assert(new StringToMap(Literal(null)).checkInputDataTypes().isFailure)
+    assert(new StringToMap(Literal("a:1,b:2,c:3"), Literal(null)).checkInputDataTypes().isFailure)
+    assert(StringToMap(Literal("a:1,b:2,c:3"), Literal(null), Literal(null))
+      .checkInputDataTypes().isFailure)
+    assert(new StringToMap(Literal(null), Literal(null)).checkInputDataTypes().isFailure)
+
+    assert(new StringToMap(Literal("a:1_b:2_c:3"), NonFoldableLiteral("_"))
+        .checkInputDataTypes().isFailure)
+    assert(
+      new StringToMap(Literal("a=1_b=2_c=3"), Literal("_"), NonFoldableLiteral("="))
+        .checkInputDataTypes().isFailure)
+  }
+
+  test("SPARK-22693: CreateNamedStruct should not use global variables") {
+    val ctx = new CodegenContext
+    CreateNamedStruct(Seq("a", "x", "b", 2.0)).genCode(ctx)
+    assert(ctx.inlinedMutableStates.isEmpty)
   }
 }

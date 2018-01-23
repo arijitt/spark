@@ -38,14 +38,19 @@ class ClosureCleanerSuite2 extends SparkFunSuite with BeforeAndAfterAll with Pri
   private var closureSerializer: SerializerInstance = null
 
   override def beforeAll(): Unit = {
+    super.beforeAll()
     sc = new SparkContext("local", "test")
     closureSerializer = sc.env.closureSerializer.newInstance()
   }
 
   override def afterAll(): Unit = {
-    sc.stop()
-    sc = null
-    closureSerializer = null
+    try {
+      sc.stop()
+      sc = null
+      closureSerializer = null
+    } finally {
+      super.afterAll()
+    }
   }
 
   // Some fields and methods to reference in inner closures later
@@ -112,9 +117,13 @@ class ClosureCleanerSuite2 extends SparkFunSuite with BeforeAndAfterAll with Pri
       findTransitively: Boolean): Map[Class[_], Set[String]] = {
     val fields = new mutable.HashMap[Class[_], mutable.Set[String]]
     outerClasses.foreach { c => fields(c) = new mutable.HashSet[String] }
-    ClosureCleaner.getClassReader(closure.getClass)
-      .accept(new FieldAccessFinder(fields, findTransitively), 0)
-    fields.mapValues(_.toSet).toMap
+    val cr = ClosureCleaner.getClassReader(closure.getClass)
+    if (cr == null) {
+      Map.empty
+    } else {
+      cr.accept(new FieldAccessFinder(fields, findTransitively), 0)
+      fields.mapValues(_.toSet).toMap
+    }
   }
 
   // Accessors for private methods

@@ -24,7 +24,7 @@ import java.util.concurrent.Semaphore
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import org.scalatest.concurrent.Timeouts
+import org.scalatest.concurrent.{Signaler, ThreadSignaler, TimeLimits}
 import org.scalatest.concurrent.Eventually._
 import org.scalatest.time.SpanSugar._
 
@@ -36,7 +36,10 @@ import org.apache.spark.streaming.receiver.WriteAheadLogBasedBlockHandler._
 import org.apache.spark.util.Utils
 
 /** Testsuite for testing the network receiver behavior */
-class ReceiverSuite extends TestSuiteBase with Timeouts with Serializable {
+class ReceiverSuite extends TestSuiteBase with TimeLimits with Serializable {
+
+  // Necessary to make ScalaTest 3.x interrupt a thread on the JVM like ScalaTest 2.2.x
+  implicit val signaler: Signaler = ThreadSignaler
 
   test("receiver life cycle") {
 
@@ -129,32 +132,6 @@ class ReceiverSuite extends TestSuiteBase with Timeouts with Serializable {
     }
   }
 
-  test("block generator") {
-    val blockGeneratorListener = new FakeBlockGeneratorListener
-    val blockIntervalMs = 200
-    val conf = new SparkConf().set("spark.streaming.blockInterval", s"${blockIntervalMs}ms")
-    val blockGenerator = new BlockGenerator(blockGeneratorListener, 1, conf)
-    val expectedBlocks = 5
-    val waitTime = expectedBlocks * blockIntervalMs + (blockIntervalMs / 2)
-    val generatedData = new ArrayBuffer[Int]
-
-    // Generate blocks
-    val startTime = System.currentTimeMillis()
-    blockGenerator.start()
-    var count = 0
-    while(System.currentTimeMillis - startTime < waitTime) {
-      blockGenerator.addData(count)
-      generatedData += count
-      count += 1
-      Thread.sleep(10)
-    }
-    blockGenerator.stop()
-
-    val recordedData = blockGeneratorListener.arrayBuffers.flatten
-    assert(blockGeneratorListener.arrayBuffers.size > 0)
-    assert(recordedData.toSet === generatedData.toSet)
-  }
-
   ignore("block generator throttling") {
     val blockGeneratorListener = new FakeBlockGeneratorListener
     val blockIntervalMs = 100
@@ -241,7 +218,7 @@ class ReceiverSuite extends TestSuiteBase with Timeouts with Serializable {
     def getCurrentLogFiles(logDirectory: File): Seq[String] = {
       try {
         if (logDirectory.exists()) {
-          logDirectory1.listFiles().filter { _.getName.startsWith("log") }.map { _.toString }
+          logDirectory.listFiles().filter { _.getName.startsWith("log") }.map { _.toString }
         } else {
           Seq.empty
         }
@@ -348,6 +325,11 @@ class ReceiverSuite extends TestSuiteBase with Timeouts with Serializable {
     }
 
     override protected def onReceiverStart(): Boolean = true
+
+    override def createBlockGenerator(
+        blockGeneratorListener: BlockGeneratorListener): BlockGenerator = {
+      null
+    }
   }
 
   /**

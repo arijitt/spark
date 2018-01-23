@@ -17,28 +17,30 @@
 
 package org.apache.spark.deploy
 
-import java.io.{ByteArrayInputStream, DataInputStream}
-import java.lang.reflect.Method
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream, DataInputStream, DataOutputStream, File, IOException}
 import java.security.PrivilegedExceptionAction
-import java.util.{Arrays, Comparator}
+import java.text.DateFormat
+import java.util.{Arrays, Comparator, Date, Locale}
 
-import scala.collection.JavaConversions._
-import scala.concurrent.duration._
-import scala.language.postfixOps
+import scala.collection.JavaConverters._
+import scala.collection.immutable.Map
+import scala.collection.mutable
+import scala.collection.mutable.HashMap
 import scala.util.control.NonFatal
 
 import com.google.common.primitives.Longs
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.FileSystem.Statistics
 import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, PathFilter}
-import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier
+import org.apache.hadoop.fs.permission.FsAction
 import org.apache.hadoop.mapred.JobConf
-import org.apache.hadoop.mapreduce.JobContext
 import org.apache.hadoop.security.{Credentials, UserGroupInformation}
+import org.apache.hadoop.security.token.{Token, TokenIdentifier}
+import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenIdentifier
 
+import org.apache.spark.{SparkConf, SparkException}
 import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.internal.Logging
 import org.apache.spark.util.Utils
-import org.apache.spark.{Logging, SparkConf, SparkException}
 
 /**
  * :: DeveloperApi ::
@@ -46,7 +48,7 @@ import org.apache.spark.{Logging, SparkConf, SparkException}
  */
 @DeveloperApi
 class SparkHadoopUtil extends Logging {
-  private val sparkConf = new SparkConf()
+  private val sparkConf = new SparkConf(false).loadFromSystemProperties(true)
   val conf: Configuration = newConfiguration(sparkConf)
   UserGroupInformation.setConfiguration(conf)
 
@@ -59,93 +61,118 @@ class SparkHadoopUtil extends Logging {
    * do a FileSystem.closeAllForUGI in order to avoid leaking Filesystems
    */
   def runAsSparkUser(func: () => Unit) {
-    val user = Utils.getCurrentUserName()
-    logDebug("running as user: " + user)
-    val ugi = UserGroupInformation.createRemoteUser(user)
-    transferCredentials(UserGroupInformation.getCurrentUser(), ugi)
-    ugi.doAs(new PrivilegedExceptionAction[Unit] {
+    createSparkUser().doAs(new PrivilegedExceptionAction[Unit] {
       def run: Unit = func()
     })
   }
 
-  def transferCredentials(source: UserGroupInformation, dest: UserGroupInformation) {
-    for (token <- source.getTokens()) {
-      dest.addToken(token)
-    }
+  def createSparkUser(): UserGroupInformation = {
+    val user = Utils.getCurrentUserName()
+    logDebug("creating UGI for user: " + user)
+    val ugi = UserGroupInformation.createRemoteUser(user)
+    transferCredentials(UserGroupInformation.getCurrentUser(), ugi)
+    ugi
   }
 
-  @Deprecated
-  def newConfiguration(): Configuration = newConfiguration(null)
+  def transferCredentials(source: UserGroupInformation, dest: UserGroupInformation) {
+    dest.addCredentials(source.getCredentials())
+  }
+
+  /**
+   * Appends S3-specific, spark.hadoop.*, and spark.buffer.size configurations to a Hadoop
+   * configuration.
+   */
+  def appendS3AndSparkHadoopConfigurations(conf: SparkConf, hadoopConf: Configuration): Unit = {
+    SparkHadoopUtil.appendS3AndSparkHadoopConfigurations(conf, hadoopConf)
+  }
+
+  /**
+   * Appends spark.hadoop.* configurations from a [[SparkConf]] to a Hadoop
+   * configuration without the spark.hadoop. prefix.
+   */
+  def appendSparkHadoopConfigs(conf: SparkConf, hadoopConf: Configuration): Unit = {
+    SparkHadoopUtil.appendSparkHadoopConfigs(conf, hadoopConf)
+  }
+
+  /**
+   * Appends spark.hadoop.* configurations from a Map to another without the spark.hadoop. prefix.
+   */
+  def appendSparkHadoopConfigs(
+      srcMap: Map[String, String],
+      destMap: HashMap[String, String]): Unit = {
+    // Copy any "spark.hadoop.foo=bar" system properties into destMap as "foo=bar"
+    for ((key, value) <- srcMap if key.startsWith("spark.hadoop.")) {
+      destMap.put(key.substring("spark.hadoop.".length), value)
+    }
+  }
 
   /**
    * Return an appropriate (subclass) of Configuration. Creating config can initializes some Hadoop
    * subsystems.
    */
   def newConfiguration(conf: SparkConf): Configuration = {
-    val hadoopConf = new Configuration()
-
-    // Note: this null check is around more than just access to the "conf" object to maintain
-    // the behavior of the old implementation of this code, for backwards compatibility.
-    if (conf != null) {
-      // Explicitly check for S3 environment variables
-      if (System.getenv("AWS_ACCESS_KEY_ID") != null &&
-          System.getenv("AWS_SECRET_ACCESS_KEY") != null) {
-        hadoopConf.set("fs.s3.awsAccessKeyId", System.getenv("AWS_ACCESS_KEY_ID"))
-        hadoopConf.set("fs.s3n.awsAccessKeyId", System.getenv("AWS_ACCESS_KEY_ID"))
-        hadoopConf.set("fs.s3.awsSecretAccessKey", System.getenv("AWS_SECRET_ACCESS_KEY"))
-        hadoopConf.set("fs.s3n.awsSecretAccessKey", System.getenv("AWS_SECRET_ACCESS_KEY"))
-      }
-      // Copy any "spark.hadoop.foo=bar" system properties into conf as "foo=bar"
-      conf.getAll.foreach { case (key, value) =>
-        if (key.startsWith("spark.hadoop.")) {
-          hadoopConf.set(key.substring("spark.hadoop.".length), value)
-        }
-      }
-      val bufferSize = conf.get("spark.buffer.size", "65536")
-      hadoopConf.set("io.file.buffer.size", bufferSize)
-    }
-
-    hadoopConf
+    SparkHadoopUtil.newConfiguration(conf)
   }
 
   /**
    * Add any user credentials to the job conf which are necessary for running on a secure Hadoop
    * cluster.
    */
-  def addCredentials(conf: JobConf) {}
+  def addCredentials(conf: JobConf): Unit = {
+    val jobCreds = conf.getCredentials()
+    jobCreds.mergeAll(UserGroupInformation.getCurrentUser().getCredentials())
+  }
 
-  def isYarnMode(): Boolean = { false }
+  def addCurrentUserCredentials(creds: Credentials): Unit = {
+    UserGroupInformation.getCurrentUser.addCredentials(creds)
+  }
 
-  def getCurrentUserCredentials(): Credentials = { null }
+  def loginUserFromKeytab(principalName: String, keytabFilename: String): Unit = {
+    if (!new File(keytabFilename).exists()) {
+      throw new SparkException(s"Keytab file: ${keytabFilename} does not exist")
+    } else {
+      logInfo("Attempting to login to Kerberos " +
+        s"using principal: ${principalName} and keytab: ${keytabFilename}")
+      UserGroupInformation.loginUserFromKeytab(principalName, keytabFilename)
+    }
+  }
 
-  def addCurrentUserCredentials(creds: Credentials) {}
-
-  def addSecretKeyToUserCredentials(key: String, secret: String) {}
-
-  def getSecretKeyFromUserCredentials(key: String): Array[Byte] = { null }
-
-  def loginUserFromKeytab(principalName: String, keytabFilename: String) {
-    UserGroupInformation.loginUserFromKeytab(principalName, keytabFilename)
+  /**
+   * Add or overwrite current user's credentials with serialized delegation tokens,
+   * also confirms correct hadoop configuration is set.
+   */
+  private[spark] def addDelegationTokens(tokens: Array[Byte], sparkConf: SparkConf) {
+    UserGroupInformation.setConfiguration(newConfiguration(sparkConf))
+    val creds = deserialize(tokens)
+    logInfo(s"Adding/updating delegation tokens ${dumpTokens(creds)}")
+    addCurrentUserCredentials(creds)
   }
 
   /**
    * Returns a function that can be called to find Hadoop FileSystem bytes read. If
    * getFSBytesReadOnThreadCallback is called from thread r at time t, the returned callback will
-   * return the bytes read on r since t.  Reflection is required because thread-level FileSystem
-   * statistics are only available as of Hadoop 2.5 (see HADOOP-10688).
-   * Returns None if the required method can't be found.
+   * return the bytes read on r since t.
    */
-  private[spark] def getFSBytesReadOnThreadCallback(): Option[() => Long] = {
-    try {
-      val threadStats = getFileSystemThreadStatistics()
-      val getBytesReadMethod = getFileSystemThreadStatisticsMethod("getBytesRead")
-      val f = () => threadStats.map(getBytesReadMethod.invoke(_).asInstanceOf[Long]).sum
-      val baselineBytesRead = f()
-      Some(() => f() - baselineBytesRead)
-    } catch {
-      case e @ (_: NoSuchMethodException | _: ClassNotFoundException) => {
-        logDebug("Couldn't find method for retrieving thread-level FileSystem input data", e)
-        None
+  private[spark] def getFSBytesReadOnThreadCallback(): () => Long = {
+    val f = () => FileSystem.getAllStatistics.asScala.map(_.getThreadStatistics.getBytesRead).sum
+    val baseline = (Thread.currentThread().getId, f())
+
+    /**
+     * This function may be called in both spawned child threads and parent task thread (in
+     * PythonRDD), and Hadoop FileSystem uses thread local variables to track the statistics.
+     * So we need a map to track the bytes read from the child threads and parent thread,
+     * summing them together to get the bytes read of this task.
+     */
+    new Function0[Long] {
+      private val bytesReadMap = new mutable.HashMap[Long, Long]()
+
+      override def apply(): Long = {
+        bytesReadMap.synchronized {
+          bytesReadMap.put(Thread.currentThread().getId, f())
+          bytesReadMap.map { case (k, v) =>
+            v - (if (k == baseline._1) baseline._2 else 0)
+          }.sum
+        }
       }
     }
   }
@@ -153,45 +180,15 @@ class SparkHadoopUtil extends Logging {
   /**
    * Returns a function that can be called to find Hadoop FileSystem bytes written. If
    * getFSBytesWrittenOnThreadCallback is called from thread r at time t, the returned callback will
-   * return the bytes written on r since t.  Reflection is required because thread-level FileSystem
-   * statistics are only available as of Hadoop 2.5 (see HADOOP-10688).
-   * Returns None if the required method can't be found.
+   * return the bytes written on r since t.
+   *
+   * @return None if the required method can't be found.
    */
-  private[spark] def getFSBytesWrittenOnThreadCallback(): Option[() => Long] = {
-    try {
-      val threadStats = getFileSystemThreadStatistics()
-      val getBytesWrittenMethod = getFileSystemThreadStatisticsMethod("getBytesWritten")
-      val f = () => threadStats.map(getBytesWrittenMethod.invoke(_).asInstanceOf[Long]).sum
-      val baselineBytesWritten = f()
-      Some(() => f() - baselineBytesWritten)
-    } catch {
-      case e @ (_: NoSuchMethodException | _: ClassNotFoundException) => {
-        logDebug("Couldn't find method for retrieving thread-level FileSystem output data", e)
-        None
-      }
-    }
-  }
-
-  private def getFileSystemThreadStatistics(): Seq[AnyRef] = {
-    val stats = FileSystem.getAllStatistics()
-    stats.map(Utils.invoke(classOf[Statistics], _, "getThreadStatistics"))
-  }
-
-  private def getFileSystemThreadStatisticsMethod(methodName: String): Method = {
-    val statisticsDataClass =
-      Utils.classForName("org.apache.hadoop.fs.FileSystem$Statistics$StatisticsData")
-    statisticsDataClass.getDeclaredMethod(methodName)
-  }
-
-  /**
-   * Using reflection to get the Configuration from JobContext/TaskAttemptContext. If we directly
-   * call `JobContext/TaskAttemptContext.getConfiguration`, it will generate different byte codes
-   * for Hadoop 1.+ and Hadoop 2.+ because JobContext/TaskAttemptContext is class in Hadoop 1.+
-   * while it's interface in Hadoop 2.+.
-   */
-  def getConfigurationFromJobContext(context: JobContext): Configuration = {
-    val method = context.getClass.getMethod("getConfiguration")
-    method.invoke(context).asInstanceOf[Configuration]
+  private[spark] def getFSBytesWrittenOnThreadCallback(): () => Long = {
+    val threadStats = FileSystem.getAllStatistics.asScala.map(_.getThreadStatistics)
+    val f = () => threadStats.map(_.getBytesWritten).sum
+    val baselineBytesWritten = f()
+    () => f() - baselineBytesWritten
   }
 
   /**
@@ -210,11 +207,11 @@ class SparkHadoopUtil extends Logging {
    */
   def listLeafStatuses(fs: FileSystem, baseStatus: FileStatus): Seq[FileStatus] = {
     def recurse(status: FileStatus): Seq[FileStatus] = {
-      val (directories, leaves) = fs.listStatus(status.getPath).partition(_.isDir)
+      val (directories, leaves) = fs.listStatus(status.getPath).partition(_.isDirectory)
       leaves ++ directories.flatMap(f => listLeafStatuses(fs, f))
     }
 
-    if (baseStatus.isDir) recurse(baseStatus) else Seq(baseStatus)
+    if (baseStatus.isDirectory) recurse(baseStatus) else Seq(baseStatus)
   }
 
   def listLeafDirStatuses(fs: FileSystem, basePath: Path): Seq[FileStatus] = {
@@ -223,28 +220,36 @@ class SparkHadoopUtil extends Logging {
 
   def listLeafDirStatuses(fs: FileSystem, baseStatus: FileStatus): Seq[FileStatus] = {
     def recurse(status: FileStatus): Seq[FileStatus] = {
-      val (directories, files) = fs.listStatus(status.getPath).partition(_.isDir)
+      val (directories, files) = fs.listStatus(status.getPath).partition(_.isDirectory)
       val leaves = if (directories.isEmpty) Seq(status) else Seq.empty[FileStatus]
       leaves ++ directories.flatMap(dir => listLeafDirStatuses(fs, dir))
     }
 
-    assert(baseStatus.isDir)
+    assert(baseStatus.isDirectory)
     recurse(baseStatus)
+  }
+
+  def isGlobPath(pattern: Path): Boolean = {
+    pattern.toString.exists("{}[]*?\\".toSet.contains)
   }
 
   def globPath(pattern: Path): Seq[Path] = {
     val fs = pattern.getFileSystem(conf)
+    globPath(fs, pattern)
+  }
+
+  def globPath(fs: FileSystem, pattern: Path): Seq[Path] = {
     Option(fs.globStatus(pattern)).map { statuses =>
       statuses.map(_.getPath.makeQualified(fs.getUri, fs.getWorkingDirectory)).toSeq
     }.getOrElse(Seq.empty[Path])
   }
 
   def globPathIfNecessary(pattern: Path): Seq[Path] = {
-    if (pattern.toString.exists("{}[]*?\\".toSet.contains)) {
-      globPath(pattern)
-    } else {
-      Seq(pattern)
-    }
+    if (isGlobPath(pattern)) globPath(pattern) else Seq(pattern)
+  }
+
+  def globPathIfNecessary(fs: FileSystem, pattern: Path): Seq[Path] = {
+    if (isGlobPath(pattern)) globPath(fs, pattern) else Seq(pattern)
   }
 
   /**
@@ -278,29 +283,6 @@ class SparkHadoopUtil extends Logging {
     }
   }
 
-  /**
-   * How much time is remaining (in millis) from now to (fraction * renewal time for the token that
-   * is valid the latest)?
-   * This will return -ve (or 0) value if the fraction of validity has already expired.
-   */
-  def getTimeFromNowToRenewal(
-      sparkConf: SparkConf,
-      fraction: Double,
-      credentials: Credentials): Long = {
-    val now = System.currentTimeMillis()
-
-    val renewalInterval =
-      sparkConf.getLong("spark.yarn.token.renewal.interval", (24 hours).toMillis)
-
-    credentials.getAllTokens.filter(_.getKind == DelegationTokenIdentifier.HDFS_DELEGATION_KIND)
-      .map { t =>
-      val identifier = new DelegationTokenIdentifier()
-      identifier.readFields(new DataInputStream(new ByteArrayInputStream(t.getIdentifier)))
-      (identifier.getIssueDate + fraction * renewalInterval).toLong - now
-    }.foldLeft(0L)(math.max)
-  }
-
-
   private[spark] def getSuffixForCredentialsPath(credentialsPath: Path): Int = {
     val fileName = credentialsPath.getName
     fileName.substring(
@@ -316,7 +298,7 @@ class SparkHadoopUtil extends Logging {
    */
   def substituteHadoopVariables(text: String, hadoopConf: Configuration): String = {
     text match {
-      case HADOOP_CONF_PATTERN(matched) => {
+      case HADOOP_CONF_PATTERN(matched) =>
         logDebug(text + " matched " + HADOOP_CONF_PATTERN)
         val key = matched.substring(13, matched.length() - 1) // remove ${hadoopconf- .. }
         val eval = Option[String](hadoopConf.get(key))
@@ -331,24 +313,11 @@ class SparkHadoopUtil extends Logging {
           // Continue to substitute more variables.
           substituteHadoopVariables(eval.get, hadoopConf)
         }
-      }
-      case _ => {
+      case _ =>
         logDebug(text + " didn't match " + HADOOP_CONF_PATTERN)
         text
-      }
     }
   }
-
-  /**
-   * Start a thread to periodically update the current user's credentials with new delegation
-   * tokens so that writes to HDFS do not fail.
-   */
-  private[spark] def startExecutorDelegationTokenRenewer(conf: SparkConf) {}
-
-  /**
-   * Stop the thread that does the delegation token updates.
-   */
-  private[spark] def stopExecutorDelegationTokenRenewer() {}
 
   /**
    * Return a fresh Hadoop configuration, bypassing the HDFS cache mechanism.
@@ -362,31 +331,168 @@ class SparkHadoopUtil extends Logging {
     newConf.setBoolean(confKey, true)
     newConf
   }
+
+  /**
+   * Dump the credentials' tokens to string values.
+   *
+   * @param credentials credentials
+   * @return an iterator over the string values. If no credentials are passed in: an empty list
+   */
+  private[spark] def dumpTokens(credentials: Credentials): Iterable[String] = {
+    if (credentials != null) {
+      credentials.getAllTokens.asScala.map(tokenToString)
+    } else {
+      Seq.empty
+    }
+  }
+
+  /**
+   * Convert a token to a string for logging.
+   * If its an abstract delegation token, attempt to unmarshall it and then
+   * print more details, including timestamps in human-readable form.
+   *
+   * @param token token to convert to a string
+   * @return a printable string value.
+   */
+  private[spark] def tokenToString(token: Token[_ <: TokenIdentifier]): String = {
+    val df = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT, Locale.US)
+    val buffer = new StringBuilder(128)
+    buffer.append(token.toString)
+    try {
+      val ti = token.decodeIdentifier
+      buffer.append("; ").append(ti)
+      ti match {
+        case dt: AbstractDelegationTokenIdentifier =>
+          // include human times and the renewer, which the HDFS tokens toString omits
+          buffer.append("; Renewer: ").append(dt.getRenewer)
+          buffer.append("; Issued: ").append(df.format(new Date(dt.getIssueDate)))
+          buffer.append("; Max Date: ").append(df.format(new Date(dt.getMaxDate)))
+        case _ =>
+      }
+    } catch {
+      case e: IOException =>
+        logDebug(s"Failed to decode $token: $e", e)
+    }
+    buffer.toString
+  }
+
+  private[spark] def checkAccessPermission(status: FileStatus, mode: FsAction): Boolean = {
+    val perm = status.getPermission
+    val ugi = UserGroupInformation.getCurrentUser
+
+    if (ugi.getShortUserName == status.getOwner) {
+      if (perm.getUserAction.implies(mode)) {
+        return true
+      }
+    } else if (ugi.getGroupNames.contains(status.getGroup)) {
+      if (perm.getGroupAction.implies(mode)) {
+        return true
+      }
+    } else if (perm.getOtherAction.implies(mode)) {
+      return true
+    }
+
+    logDebug(s"Permission denied: user=${ugi.getShortUserName}, " +
+      s"path=${status.getPath}:${status.getOwner}:${status.getGroup}" +
+      s"${if (status.isDirectory) "d" else "-"}$perm")
+    false
+  }
+
+  def serialize(creds: Credentials): Array[Byte] = {
+    val byteStream = new ByteArrayOutputStream
+    val dataStream = new DataOutputStream(byteStream)
+    creds.writeTokenStorageToStream(dataStream)
+    byteStream.toByteArray
+  }
+
+  def deserialize(tokenBytes: Array[Byte]): Credentials = {
+    val tokensBuf = new ByteArrayInputStream(tokenBytes)
+
+    val creds = new Credentials()
+    creds.readTokenStorageStream(new DataInputStream(tokensBuf))
+    creds
+  }
+
+  def isProxyUser(ugi: UserGroupInformation): Boolean = {
+    ugi.getAuthenticationMethod() == UserGroupInformation.AuthenticationMethod.PROXY
+  }
+
 }
 
 object SparkHadoopUtil {
 
-  private val hadoop = {
-    val yarnMode = java.lang.Boolean.valueOf(
-        System.getProperty("SPARK_YARN_MODE", System.getenv("SPARK_YARN_MODE")))
-    if (yarnMode) {
-      try {
-        Utils.classForName("org.apache.spark.deploy.yarn.YarnSparkHadoopUtil")
-          .newInstance()
-          .asInstanceOf[SparkHadoopUtil]
-      } catch {
-       case e: Exception => throw new SparkException("Unable to load YARN support", e)
-      }
-    } else {
-      new SparkHadoopUtil
-    }
-  }
+  private lazy val instance = new SparkHadoopUtil
 
   val SPARK_YARN_CREDS_TEMP_EXTENSION = ".tmp"
 
   val SPARK_YARN_CREDS_COUNTER_DELIM = "-"
 
-  def get: SparkHadoopUtil = {
-    hadoop
+  /**
+   * Number of records to update input metrics when reading from HadoopRDDs.
+   *
+   * Each update is potentially expensive because we need to use reflection to access the
+   * Hadoop FileSystem API of interest (only available in 2.5), so we should do this sparingly.
+   */
+  private[spark] val UPDATE_INPUT_METRICS_INTERVAL_RECORDS = 1000
+
+  def get: SparkHadoopUtil = instance
+
+  /**
+   * Given an expiration date (e.g. for Hadoop Delegation Tokens) return a the date
+   * when a given fraction of the duration until the expiration date has passed.
+   * Formula: current time + (fraction * (time until expiration))
+   * @param expirationDate Drop-dead expiration date
+   * @param fraction fraction of the time until expiration return
+   * @return Date when the fraction of the time until expiration has passed
+   */
+  private[spark] def getDateOfNextUpdate(expirationDate: Long, fraction: Double): Long = {
+    val ct = System.currentTimeMillis
+    (ct + (fraction * (expirationDate - ct))).toLong
+  }
+
+  /**
+   * Returns a Configuration object with Spark configuration applied on top. Unlike
+   * the instance method, this will always return a Configuration instance, and not a
+   * cluster manager-specific type.
+   */
+  private[spark] def newConfiguration(conf: SparkConf): Configuration = {
+    val hadoopConf = new Configuration()
+    appendS3AndSparkHadoopConfigurations(conf, hadoopConf)
+    hadoopConf
+  }
+
+  private def appendS3AndSparkHadoopConfigurations(
+      conf: SparkConf,
+      hadoopConf: Configuration): Unit = {
+    // Note: this null check is around more than just access to the "conf" object to maintain
+    // the behavior of the old implementation of this code, for backwards compatibility.
+    if (conf != null) {
+      // Explicitly check for S3 environment variables
+      val keyId = System.getenv("AWS_ACCESS_KEY_ID")
+      val accessKey = System.getenv("AWS_SECRET_ACCESS_KEY")
+      if (keyId != null && accessKey != null) {
+        hadoopConf.set("fs.s3.awsAccessKeyId", keyId)
+        hadoopConf.set("fs.s3n.awsAccessKeyId", keyId)
+        hadoopConf.set("fs.s3a.access.key", keyId)
+        hadoopConf.set("fs.s3.awsSecretAccessKey", accessKey)
+        hadoopConf.set("fs.s3n.awsSecretAccessKey", accessKey)
+        hadoopConf.set("fs.s3a.secret.key", accessKey)
+
+        val sessionToken = System.getenv("AWS_SESSION_TOKEN")
+        if (sessionToken != null) {
+          hadoopConf.set("fs.s3a.session.token", sessionToken)
+        }
+      }
+      appendSparkHadoopConfigs(conf, hadoopConf)
+      val bufferSize = conf.get("spark.buffer.size", "65536")
+      hadoopConf.set("io.file.buffer.size", bufferSize)
+    }
+  }
+
+  private def appendSparkHadoopConfigs(conf: SparkConf, hadoopConf: Configuration): Unit = {
+    // Copy any "spark.hadoop.foo=bar" spark properties into conf as "foo=bar"
+    for ((key, value) <- conf.getAll if key.startsWith("spark.hadoop.")) {
+      hadoopConf.set(key.substring("spark.hadoop.".length), value)
+    }
   }
 }

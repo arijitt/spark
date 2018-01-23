@@ -44,13 +44,13 @@ class StatusTrackerSuite extends SparkFunSuite with Matchers with LocalSparkCont
     stageIds.size should be(2)
 
     val firstStageInfo = eventually(timeout(10 seconds)) {
-      sc.statusTracker.getStageInfo(stageIds(0)).get
+      sc.statusTracker.getStageInfo(stageIds.min).get
     }
-    firstStageInfo.stageId() should be(stageIds(0))
+    firstStageInfo.stageId() should be(stageIds.min)
     firstStageInfo.currentAttemptId() should be(0)
     firstStageInfo.numTasks() should be(2)
     eventually(timeout(10 seconds)) {
-      val updatedFirstStageInfo = sc.statusTracker.getStageInfo(stageIds(0)).get
+      val updatedFirstStageInfo = sc.statusTracker.getStageInfo(stageIds.min).get
       updatedFirstStageInfo.numCompletedTasks() should be(2)
       updatedFirstStageInfo.numActiveTasks() should be(0)
       updatedFirstStageInfo.numFailedTasks() should be(0)
@@ -84,6 +84,32 @@ class StatusTrackerSuite extends SparkFunSuite with Matchers with LocalSparkCont
     eventually(timeout(10 seconds)) {
       sc.statusTracker.getJobIdsForGroup("my-job-group").toSet should be (
         Set(firstJobId, secondJobId))
+    }
+  }
+
+  test("getJobIdsForGroup() with takeAsync()") {
+    sc = new SparkContext("local", "test", new SparkConf(false))
+    sc.setJobGroup("my-job-group2", "description")
+    sc.statusTracker.getJobIdsForGroup("my-job-group2") shouldBe empty
+    val firstJobFuture = sc.parallelize(1 to 1000, 1).takeAsync(1)
+    val firstJobId = eventually(timeout(10 seconds)) {
+      firstJobFuture.jobIds.head
+    }
+    eventually(timeout(10 seconds)) {
+      sc.statusTracker.getJobIdsForGroup("my-job-group2") should be (Seq(firstJobId))
+    }
+  }
+
+  test("getJobIdsForGroup() with takeAsync() across multiple partitions") {
+    sc = new SparkContext("local", "test", new SparkConf(false))
+    sc.setJobGroup("my-job-group2", "description")
+    sc.statusTracker.getJobIdsForGroup("my-job-group2") shouldBe empty
+    val firstJobFuture = sc.parallelize(1 to 1000, 2).takeAsync(999)
+    val firstJobId = eventually(timeout(10 seconds)) {
+      firstJobFuture.jobIds.head
+    }
+    eventually(timeout(10 seconds)) {
+      sc.statusTracker.getJobIdsForGroup("my-job-group2") should have size 2
     }
   }
 }

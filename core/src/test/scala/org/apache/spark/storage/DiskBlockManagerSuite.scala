@@ -18,10 +18,8 @@
 package org.apache.spark.storage
 
 import java.io.{File, FileWriter}
+import java.util.UUID
 
-import scala.language.reflectiveCalls
-
-import org.mockito.Mockito.{mock, when}
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach}
 
 import org.apache.spark.{SparkConf, SparkFunSuite}
@@ -33,8 +31,6 @@ class DiskBlockManagerSuite extends SparkFunSuite with BeforeAndAfterEach with B
   private var rootDir1: File = _
   private var rootDirs: String = _
 
-  val blockManager = mock(classOf[BlockManager])
-  when(blockManager.conf).thenReturn(testConf)
   var diskBlockManager: DiskBlockManager = _
 
   override def beforeAll() {
@@ -45,19 +41,27 @@ class DiskBlockManagerSuite extends SparkFunSuite with BeforeAndAfterEach with B
   }
 
   override def afterAll() {
-    super.afterAll()
-    Utils.deleteRecursively(rootDir0)
-    Utils.deleteRecursively(rootDir1)
+    try {
+      Utils.deleteRecursively(rootDir0)
+      Utils.deleteRecursively(rootDir1)
+    } finally {
+      super.afterAll()
+    }
   }
 
   override def beforeEach() {
+    super.beforeEach()
     val conf = testConf.clone
     conf.set("spark.local.dir", rootDirs)
-    diskBlockManager = new DiskBlockManager(blockManager, conf)
+    diskBlockManager = new DiskBlockManager(conf, deleteFilesOnStop = true)
   }
 
   override def afterEach() {
-    diskBlockManager.stop()
+    try {
+      diskBlockManager.stop()
+    } finally {
+      super.afterEach()
+    }
   }
 
   test("basic block creation") {
@@ -74,6 +78,12 @@ class DiskBlockManagerSuite extends SparkFunSuite with BeforeAndAfterEach with B
     val files = ids.map(id => diskBlockManager.getFile(id))
     files.foreach(file => writeToFile(file, 10))
     assert(diskBlockManager.getAllBlocks.toSet === ids.toSet)
+  }
+
+  test("SPARK-22227: non-block files are skipped") {
+    val file = diskBlockManager.getFile("unmanaged_file")
+    writeToFile(file, 10)
+    assert(diskBlockManager.getAllBlocks().isEmpty)
   }
 
   def writeToFile(file: File, numBytes: Int) {

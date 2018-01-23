@@ -21,8 +21,10 @@ import java.util.concurrent.atomic.AtomicLong
 
 import scala.reflect.ClassTag
 
-import org.apache.spark._
-import org.apache.spark.util.Utils
+import org.apache.commons.collections.map.{AbstractReferenceMap, ReferenceMap}
+
+import org.apache.spark.{SecurityManager, SparkConf}
+import org.apache.spark.internal.Logging
 
 private[spark] class BroadcastManager(
     val isDriver: Boolean,
@@ -39,15 +41,8 @@ private[spark] class BroadcastManager(
   private def initialize() {
     synchronized {
       if (!initialized) {
-        val broadcastFactoryClass =
-          conf.get("spark.broadcast.factory", "org.apache.spark.broadcast.TorrentBroadcastFactory")
-
-        broadcastFactory =
-          Utils.classForName(broadcastFactoryClass).newInstance.asInstanceOf[BroadcastFactory]
-
-        // Initialize appropriate BroadcastFactory and BroadcastObject
+        broadcastFactory = new TorrentBroadcastFactory
         broadcastFactory.initialize(isDriver, conf, securityManager)
-
         initialized = true
       }
     }
@@ -58,6 +53,10 @@ private[spark] class BroadcastManager(
   }
 
   private val nextBroadcastId = new AtomicLong(0)
+
+  private[broadcast] val cachedValues = {
+    new ReferenceMap(AbstractReferenceMap.HARD, AbstractReferenceMap.WEAK)
+  }
 
   def newBroadcast[T: ClassTag](value_ : T, isLocal: Boolean): Broadcast[T] = {
     broadcastFactory.newBroadcast[T](value_, isLocal, nextBroadcastId.getAndIncrement())

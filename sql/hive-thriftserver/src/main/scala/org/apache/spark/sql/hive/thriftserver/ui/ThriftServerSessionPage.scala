@@ -23,12 +23,13 @@ import javax.servlet.http.HttpServletRequest
 import scala.xml.Node
 
 import org.apache.commons.lang3.StringEscapeUtils
-import org.apache.spark.Logging
-import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.{ExecutionInfo, ExecutionState}
-import org.apache.spark.ui.UIUtils._
-import org.apache.spark.ui._
 
-/** Page for Spark Web UI that shows statistics of a streaming job */
+import org.apache.spark.internal.Logging
+import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.{ExecutionInfo, ExecutionState}
+import org.apache.spark.ui._
+import org.apache.spark.ui.UIUtils._
+
+/** Page for Spark Web UI that shows statistics of jobs running in the thrift server */
 private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
   extends WebUIPage("session") with Logging {
 
@@ -38,32 +39,34 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
 
   /** Render the page */
   def render(request: HttpServletRequest): Seq[Node] = {
-    val parameterId = request.getParameter("id")
+    // stripXSS is called first to remove suspicious characters used in XSS attacks
+    val parameterId = UIUtils.stripXSS(request.getParameter("id"))
     require(parameterId != null && parameterId.nonEmpty, "Missing id parameter")
-    val sessionStat = listener.sessionList.find(stat => {
-      stat._1 == parameterId
-    }).getOrElse(null)
-    require(sessionStat != null, "Invalid sessionID[" + parameterId + "]")
 
     val content =
-      generateBasicStats() ++
-      <br/> ++
-      <h4>
-        User {sessionStat._2.userName},
-        IP {sessionStat._2.ip},
-        Session created at {formatDate(sessionStat._2.startTimestamp)},
-        Total run {sessionStat._2.totalExecution} SQL
-      </h4> ++
-      generateSQLStatsTable(sessionStat._2.sessionId)
+      listener.synchronized { // make sure all parts in this page are consistent
+        val sessionStat = listener.getSession(parameterId).getOrElse(null)
+        require(sessionStat != null, "Invalid sessionID[" + parameterId + "]")
+
+        generateBasicStats() ++
+        <br/> ++
+        <h4>
+        User {sessionStat.userName},
+        IP {sessionStat.ip},
+        Session created at {formatDate(sessionStat.startTimestamp)},
+        Total run {sessionStat.totalExecution} SQL
+        </h4> ++
+        generateSQLStatsTable(sessionStat.sessionId)
+      }
     UIUtils.headerSparkPage("JDBC/ODBC Session", content, parent, Some(5000))
   }
 
-  /** Generate basic stats of the streaming program */
+  /** Generate basic stats of the thrift server program */
   private def generateBasicStats(): Seq[Node] = {
     val timeSinceStart = System.currentTimeMillis() - startTime.getTime
     <ul class ="unstyled">
       <li>
-        <strong>Started at: </strong> {startTime.toString}
+        <strong>Started at: </strong> {formatDate(startTime)}
       </li>
       <li>
         <strong>Time since start: </strong>{formatDurationVerbose(timeSinceStart)}
@@ -73,13 +76,13 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
 
   /** Generate stats of batch statements of the thrift server program */
   private def generateSQLStatsTable(sessionID: String): Seq[Node] = {
-    val executionList = listener.executionList
-      .filter(_._2.sessionId == sessionID)
+    val executionList = listener.getExecutionList
+      .filter(_.sessionId == sessionID)
     val numStatement = executionList.size
     val table = if (numStatement > 0) {
       val headerRow = Seq("User", "JobID", "GroupID", "Start Time", "Finish Time", "Duration",
         "Statement", "State", "Detail")
-      val dataRows = executionList.values.toSeq.sortBy(_.startTimestamp).reverse
+      val dataRows = executionList.sortBy(_.startTimestamp).reverse
 
       def generateDataRow(info: ExecutionInfo): Seq[Node] = {
         val jobLink = info.jobId.map { id: String =>
@@ -144,41 +147,6 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
     <td>{errorSummary}{details}</td>
   }
 
-  /** Generate stats of batch sessions of the thrift server program */
-  private def generateSessionStatsTable(): Seq[Node] = {
-    val numBatches = listener.sessionList.size
-    val table = if (numBatches > 0) {
-      val dataRows =
-        listener.sessionList.values.toSeq.sortBy(_.startTimestamp).reverse.map ( session =>
-        Seq(
-          session.userName,
-          session.ip,
-          session.sessionId,
-          formatDate(session.startTimestamp),
-          formatDate(session.finishTimestamp),
-          formatDurationOption(Some(session.totalTime)),
-          session.totalExecution.toString
-        )
-      ).toSeq
-      val headerRow = Seq("User", "IP", "Session ID", "Start Time", "Finish Time", "Duration",
-        "Total Execute")
-      Some(listingTable(headerRow, dataRows))
-    } else {
-      None
-    }
-
-    val content =
-      <h5>Session Statistics</h5> ++
-      <div>
-        <ul class="unstyled">
-          {table.getOrElse("No statistics have been generated yet.")}
-        </ul>
-      </div>
-
-    content
-  }
-
-
   /**
    * Returns a human-readable string representing a duration such as "5 second 35 ms"
    */
@@ -194,4 +162,3 @@ private[ui] class ThriftServerSessionPage(parent: ThriftServerTab)
     UIUtils.listingTable(headers, generateDataRow, data, fixedWidth = true)
   }
 }
-

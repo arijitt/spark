@@ -18,10 +18,9 @@
 package org.apache.spark.util
 
 import java.io.NotSerializableException
-import java.util.Random
 
-import org.apache.spark.LocalSparkContext._
 import org.apache.spark.{SparkContext, SparkException, SparkFunSuite, TaskContext}
+import org.apache.spark.LocalSparkContext._
 import org.apache.spark.partial.CountEvaluator
 import org.apache.spark.rdd.RDD
 
@@ -91,11 +90,6 @@ class ClosureCleanerSuite extends SparkFunSuite {
       expectCorrectException { TestUserClosuresActuallyCleaned.testKeyBy(rdd) }
       expectCorrectException { TestUserClosuresActuallyCleaned.testMapPartitions(rdd) }
       expectCorrectException { TestUserClosuresActuallyCleaned.testMapPartitionsWithIndex(rdd) }
-      expectCorrectException { TestUserClosuresActuallyCleaned.testMapPartitionsWithContext(rdd) }
-      expectCorrectException { TestUserClosuresActuallyCleaned.testFlatMapWith(rdd) }
-      expectCorrectException { TestUserClosuresActuallyCleaned.testFilterWith(rdd) }
-      expectCorrectException { TestUserClosuresActuallyCleaned.testForEachWith(rdd) }
-      expectCorrectException { TestUserClosuresActuallyCleaned.testMapWith(rdd) }
       expectCorrectException { TestUserClosuresActuallyCleaned.testZipPartitions2(rdd) }
       expectCorrectException { TestUserClosuresActuallyCleaned.testZipPartitions3(rdd) }
       expectCorrectException { TestUserClosuresActuallyCleaned.testZipPartitions4(rdd) }
@@ -125,11 +119,70 @@ class ClosureCleanerSuite extends SparkFunSuite {
   test("createNullValue") {
     new TestCreateNullValue().run()
   }
+
+  test("SPARK-22328: ClosureCleaner misses referenced superclass fields: case 1") {
+    val concreteObject = new TestAbstractClass {
+      val n2 = 222
+      val s2 = "bbb"
+      val d2 = 2.0d
+
+      def run(): Seq[(Int, Int, String, String, Double, Double)] = {
+        withSpark(new SparkContext("local", "test")) { sc =>
+          val rdd = sc.parallelize(1 to 1)
+          body(rdd)
+        }
+      }
+
+      def body(rdd: RDD[Int]): Seq[(Int, Int, String, String, Double, Double)] = rdd.map { _ =>
+        (n1, n2, s1, s2, d1, d2)
+      }.collect()
+    }
+    assert(concreteObject.run() === Seq((111, 222, "aaa", "bbb", 1.0d, 2.0d)))
+  }
+
+  test("SPARK-22328: ClosureCleaner misses referenced superclass fields: case 2") {
+    val concreteObject = new TestAbstractClass2 {
+      val n2 = 222
+      val s2 = "bbb"
+      val d2 = 2.0d
+      def getData: Int => (Int, Int, String, String, Double, Double) = _ => (n1, n2, s1, s2, d1, d2)
+    }
+    withSpark(new SparkContext("local", "test")) { sc =>
+      val rdd = sc.parallelize(1 to 1).map(concreteObject.getData)
+      assert(rdd.collect() === Seq((111, 222, "aaa", "bbb", 1.0d, 2.0d)))
+    }
+  }
+
+  test("SPARK-22328: multiple outer classes have the same parent class") {
+    val concreteObject = new TestAbstractClass2 {
+
+      val innerObject = new TestAbstractClass2 {
+        override val n1 = 222
+        override val s1 = "bbb"
+      }
+
+      val innerObject2 = new TestAbstractClass2 {
+        override val n1 = 444
+        val n3 = 333
+        val s3 = "ccc"
+        val d3 = 3.0d
+
+        def getData: Int => (Int, Int, String, String, Double, Double, Int, String) =
+          _ => (n1, n3, s1, s3, d1, d3, innerObject.n1, innerObject.s1)
+      }
+    }
+    withSpark(new SparkContext("local", "test")) { sc =>
+      val rdd = sc.parallelize(1 to 1).map(concreteObject.innerObject2.getData)
+      assert(rdd.collect() === Seq((444, 333, "aaa", "ccc", 1.0d, 3.0d, 222, "bbb")))
+    }
+  }
 }
 
 // A non-serializable class we create in closures to make sure that we aren't
 // keeping references to unneeded variables from our outer closures.
 class NonSerializable(val id: Int = -1) {
+  override def hashCode(): Int = id
+
   override def equals(other: Any): Boolean = {
     other match {
       case o: NonSerializable => id == o.id
@@ -269,21 +322,6 @@ private object TestUserClosuresActuallyCleaned {
   def testMapPartitionsWithIndex(rdd: RDD[Int]): Unit = {
     rdd.mapPartitionsWithIndex { (_, it) => return; it }.count()
   }
-  def testFlatMapWith(rdd: RDD[Int]): Unit = {
-    rdd.flatMapWith ((index: Int) => new Random(index + 42)){ (_, it) => return; Seq() }.count()
-  }
-  def testMapWith(rdd: RDD[Int]): Unit = {
-    rdd.mapWith ((index: Int) => new Random(index + 42)){ (_, it) => return; 0 }.count()
-  }
-  def testFilterWith(rdd: RDD[Int]): Unit = {
-    rdd.filterWith ((index: Int) => new Random(index + 42)){ (_, it) => return; true }.count()
-  }
-  def testForEachWith(rdd: RDD[Int]): Unit = {
-    rdd.foreachWith ((index: Int) => new Random(index + 42)){ (_, it) => return }
-  }
-  def testMapPartitionsWithContext(rdd: RDD[Int]): Unit = {
-    rdd.mapPartitionsWithContext { (_, it) => return; it }.count()
-  }
   def testZipPartitions2(rdd: RDD[Int]): Unit = {
     rdd.zipPartitions(rdd) { case (it1, it2) => return; it1 }.count()
   }
@@ -395,4 +433,19 @@ class TestCreateNullValue {
     }
     nestedClosure()
   }
+}
+
+abstract class TestAbstractClass extends Serializable {
+  val n1 = 111
+  val s1 = "aaa"
+  protected val d1 = 1.0d
+
+  def run(): Seq[(Int, Int, String, String, Double, Double)]
+  def body(rdd: RDD[Int]): Seq[(Int, Int, String, String, Double, Double)]
+}
+
+abstract class TestAbstractClass2 extends Serializable {
+  val n1 = 111
+  val s1 = "aaa"
+  protected val d1 = 1.0d
 }

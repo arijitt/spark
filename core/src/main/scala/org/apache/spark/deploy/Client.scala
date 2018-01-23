@@ -22,13 +22,14 @@ import scala.concurrent.ExecutionContext
 import scala.reflect.ClassTag
 import scala.util.{Failure, Success}
 
-import org.apache.log4j.{Level, Logger}
+import org.apache.log4j.Logger
 
-import org.apache.spark.rpc.{RpcEndpointRef, RpcAddress, RpcEnv, ThreadSafeRpcEndpoint}
-import org.apache.spark.{Logging, SecurityManager, SparkConf}
+import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.DeployMessages._
 import org.apache.spark.deploy.master.{DriverState, Master}
-import org.apache.spark.util.{ThreadUtils, SparkExitCode, Utils}
+import org.apache.spark.internal.Logging
+import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef, RpcEnv, ThreadSafeRpcEndpoint}
+import org.apache.spark.util.{SparkExitCode, ThreadUtils, Utils}
 
 /**
  * Proxy that relays messages to the driver.
@@ -92,19 +93,19 @@ private class ClientEndpoint(
           driverArgs.cores,
           driverArgs.supervise,
           command)
-        ayncSendToMasterAndForwardReply[SubmitDriverResponse](
+        asyncSendToMasterAndForwardReply[SubmitDriverResponse](
           RequestSubmitDriver(driverDescription))
 
       case "kill" =>
         val driverId = driverArgs.driverId
-        ayncSendToMasterAndForwardReply[KillDriverResponse](RequestKillDriver(driverId))
+        asyncSendToMasterAndForwardReply[KillDriverResponse](RequestKillDriver(driverId))
     }
   }
 
   /**
    * Send the message to master and forward the reply to self asynchronously.
    */
-  private def ayncSendToMasterAndForwardReply[T: ClassTag](message: Any): Unit = {
+  private def asyncSendToMasterAndForwardReply[T: ClassTag](message: Any): Unit = {
     for (masterEndpoint <- masterEndpoints) {
       masterEndpoint.ask[T](message).onComplete {
         case Success(v) => self.send(v)
@@ -115,33 +116,34 @@ private class ClientEndpoint(
   }
 
   /* Find out driver status then exit the JVM */
-  def pollAndReportStatus(driverId: String) {
+  def pollAndReportStatus(driverId: String): Unit = {
     // Since ClientEndpoint is the only RpcEndpoint in the process, blocking the event loop thread
     // is fine.
     logInfo("... waiting before polling master for driver state")
     Thread.sleep(5000)
     logInfo("... polling master for driver state")
     val statusResponse =
-      activeMasterEndpoint.askWithRetry[DriverStatusResponse](RequestDriverStatus(driverId))
-    statusResponse.found match {
-      case false =>
-        logError(s"ERROR: Cluster master did not recognize $driverId")
-        System.exit(-1)
-      case true =>
-        logInfo(s"State of $driverId is ${statusResponse.state.get}")
-        // Worker node, if present
-        (statusResponse.workerId, statusResponse.workerHostPort, statusResponse.state) match {
-          case (Some(id), Some(hostPort), Some(DriverState.RUNNING)) =>
-            logInfo(s"Driver running on $hostPort ($id)")
-          case _ =>
-        }
-        // Exception, if present
-        statusResponse.exception.map { e =>
+      activeMasterEndpoint.askSync[DriverStatusResponse](RequestDriverStatus(driverId))
+    if (statusResponse.found) {
+      logInfo(s"State of $driverId is ${statusResponse.state.get}")
+      // Worker node, if present
+      (statusResponse.workerId, statusResponse.workerHostPort, statusResponse.state) match {
+        case (Some(id), Some(hostPort), Some(DriverState.RUNNING)) =>
+          logInfo(s"Driver running on $hostPort ($id)")
+        case _ =>
+      }
+      // Exception, if present
+      statusResponse.exception match {
+        case Some(e) =>
           logError(s"Exception from cluster was: $e")
           e.printStackTrace()
           System.exit(-1)
-        }
-        System.exit(0)
+        case _ =>
+          System.exit(0)
+      }
+    } else {
+      logError(s"ERROR: Cluster master did not recognize $driverId")
+      System.exit(-1)
     }
   }
 
@@ -215,24 +217,28 @@ object Client {
       println("Use ./bin/spark-submit with \"--master spark://host:port\"")
     }
     // scalastyle:on println
+    new ClientApp().start(args, new SparkConf())
+  }
+}
 
-    val conf = new SparkConf()
+private[spark] class ClientApp extends SparkApplication {
+
+  override def start(args: Array[String], conf: SparkConf): Unit = {
     val driverArgs = new ClientArguments(args)
 
-    if (!driverArgs.logLevel.isGreaterOrEqual(Level.WARN)) {
-      conf.set("spark.akka.logLifecycleEvents", "true")
+    if (!conf.contains("spark.rpc.askTimeout")) {
+      conf.set("spark.rpc.askTimeout", "10s")
     }
-    conf.set("spark.rpc.askTimeout", "10")
-    conf.set("akka.loglevel", driverArgs.logLevel.toString.replace("WARN", "WARNING"))
     Logger.getRootLogger.setLevel(driverArgs.logLevel)
 
     val rpcEnv =
       RpcEnv.create("driverClient", Utils.localHostName(), 0, conf, new SecurityManager(conf))
 
     val masterEndpoints = driverArgs.masters.map(RpcAddress.fromSparkURL).
-      map(rpcEnv.setupEndpointRef(Master.SYSTEM_NAME, _, Master.ENDPOINT_NAME))
+      map(rpcEnv.setupEndpointRef(_, Master.ENDPOINT_NAME))
     rpcEnv.setupEndpoint("client", new ClientEndpoint(rpcEnv, driverArgs, masterEndpoints, conf))
 
     rpcEnv.awaitTermination()
   }
+
 }
