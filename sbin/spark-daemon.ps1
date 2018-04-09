@@ -134,7 +134,7 @@ Function Execute-Command()
 
     Write-Host "Command process Id $commandPid recorded at $commandPidFilePath."
   }
-  else { throw [System.ApplicationException] "Failed to start command: $command." }
+  else { throw [System.ApplicationException] "Failed to start command: $commandScript $commandPath $commandArguments." }
 }
 
 Function Stop-Command()
@@ -244,6 +244,7 @@ if ($args[0].Equals("--config"))
   $sparkInstance = $args[4]
 
   if ($args.Length -gt 5) { $sparkCommandArguments = $args[5..$($args.Length - 1)] }
+  else { $sparkCommandArguments = " " }
 }
 else 
 {
@@ -252,6 +253,7 @@ else
   $sparkInstance = $args[2]
 
   if ($args.Length -gt 3) { $sparkCommandArguments = $args[3..$($args.Length - 1)] }
+  else { $sparkCommandArguments = " " }
 }
 
 Write-Host "Script action: spark-daemon $scriptAction $sparkCommand $sparkInstance $sparkCommandArguments"

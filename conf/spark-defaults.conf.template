@@ -19,9 +19,17 @@
 # This is useful for setting default environmental settings.
 
 # Example:
-# spark.master                     spark://master:7077
-# spark.eventLog.enabled           true
-# spark.eventLog.dir               hdfs://namenode:8021/directory
 # spark.serializer                 org.apache.spark.serializer.KryoSerializer
 # spark.driver.memory              5g
 # spark.executor.extraJavaOptions  -XX:+PrintGCDetails -Dkey=value -Dnumbers="one two three"
+# spark.master spark://master:7077
+
+spark.blockManager.port    38000
+spark.broadcast.port       38001
+spark.driver.port          38002
+spark.executor.port        38003
+spark.fileserver.port      38004
+spark.replClassServer.port 38005
+spark.eventLog.enabled true
+spark.eventLog.dir   adl://<storage.account.name>/spark-events
+spark.history.fs.logDirectory   adl://<storage.account.name>/spark-events
