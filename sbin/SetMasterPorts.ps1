@@ -31,10 +31,10 @@ $livyServerPort = 2022
 
 # Spark service dynamic ports
 
-#$sparkMasterPort = get-available-port
-#$sparkMasterWebPort = get-available-port
-#$sparkHistoryWebPort = get-available-port
-#$livyServerPort = get-available-port
+#$sparkMasterPort = Get-Available-Port
+#$sparkMasterWebPort = Get-Available-Port
+#$sparkHistoryWebPort = Get-Available-Port
+#$livyServerPort = Get-Available-Port
 
 # Store Local properties
 
@@ -44,30 +44,30 @@ $inputArguments = @()
 $inputArguments += ("-key", "SPARK_MASTER_PORT")
 $inputArguments += ("-value", $sparkMasterPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_MASTER_WEBUI_PORT")
 $inputArguments += ("-value", $sparkMasterWebPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_HISTORY_WEBUI_PORT")
 $inputArguments += ("-value", $sparkHistoryWebPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "LIVY_SERVER_PORT")
 $inputArguments += ("-value", $livyServerPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 # Store Global properties
 
 $userScriptPath = "$PSScriptRoot\PutGlobalProperty.ps1"
-$hostAddress = get-host-ipv4-address
+$hostAddress = Get-Host-IPV4-Address
 
 if ($hostAddress -eq $null) { $hostAddress = $env:COMPUTERNAME }
 
@@ -75,25 +75,25 @@ $inputArguments = @()
 $inputArguments += ("-key", "SPARK_MASTER_URL")
 $inputArguments += ("-value", "spark://$hostAddress`:$sparkMasterPort")
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_MASTER_WEBUI_URL")
 $inputArguments += ("-value", "http://$hostAddress`:$sparkMasterWebPort")
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_HISTORY_WEBUI_URL")
 $inputArguments += ("-value", "http://$hostAddress`:$sparkHistoryWebPort")
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "LIVY_SERVER_URL")
 $inputArguments += ("-value", "http://$hostAddress`:$livyServerPort")
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScriptPath`" $inputArguments" }
 
 # Spark application default ports
 
@@ -115,12 +115,12 @@ run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$userScri
 
 # Spark application Dynamic ports
 
-$sparkBlockManagerPort = get-available-port
-$sparkBroadcastPort = get-available-port
-$parkDriverPort = get-available-port
-$sparkExecutorPort = get-available-port
-$sparkFileServerPort = get-available-port
-$sparkReplClassServerPort = get-available-port
+$sparkBlockManagerPort = Get-Available-Port
+$sparkBroadcastPort = Get-Available-Port
+$parkDriverPort = Get-Available-Port
+$sparkExecutorPort = Get-Available-Port
+$sparkFileServerPort = Get-Available-Port
+$sparkReplClassServerPort = Get-Available-Port
 
 # Store Local properties
 
@@ -128,34 +128,34 @@ $inputArguments = @()
 $inputArguments += ("-key", "SPARK_BLOCK_MANAGER_PORT")
 $inputArguments += ("-value", $sparkBlockManagerPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_BROADCAST_PORT")
 $inputArguments += ("-value", $sparkBroadcastPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_DRIVER_PORT")
 $inputArguments += ("-value", $parkDriverPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_EXECUTOR_PORT")
 $inputArguments += ("-value", $sparkExecutorPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_FILE_SERVER_PORT")
 $inputArguments += ("-value", $sparkFileServerPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
 
 $inputArguments = @()
 $inputArguments += ("-key", "SPARK_REPL_CLASS_SERVER_PORT")
 $inputArguments += ("-value", $sparkReplClassServerPort)
 
-run-with-retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }
+Run-With-Retry -command "Invoke-Expression" -arguments @{ Command="& `"$containerScriptPath`" $inputArguments" }

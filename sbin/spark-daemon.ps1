@@ -28,6 +28,8 @@
 #   SPARK_NO_DAEMONIZE   If set, will run the proposed command in the foreground. It will not output a PID file (not applicable on Windows).
 #
 
+. $PSScriptRoot\Utilities.ps1
+
 Function Create-Dir() 
 { 
   $directoryPath = $args[0]
@@ -111,7 +113,9 @@ Function Execute-Command()
   Rotate-Spark-Log $commandLogFilePath $SPARK_MAX_LOG_FILES
   Rotate-Spark-Log $commandErrorFilePath $SPARK_MAX_LOG_FILES
 
-  $commandProcess = Start-Process $commandScript -ArgumentList "$commandPath $commandArguments" -RedirectStandardOutput $commandLogFilePath -RedirectStandardError $commandErrorFilePath -PassThru
+  #$commandProcess = Start-Process $commandScript -ArgumentList "$commandPath $commandArguments" -RedirectStandardOutput $commandLogFilePath -RedirectStandardError $commandErrorFilePath -PassThru
+
+  $commandProcess = Run-With-Retry -command 'Start-Process' -argument @{ FilePath=$commandScript; ArgumentList="$commandPath $commandArguments"; RedirectStandardOutput=$commandLogFilePath; RedirectStandardError=$commandErrorFilePath; PassThru=$true }
 
   $commandPid = $commandProcess.Id
 

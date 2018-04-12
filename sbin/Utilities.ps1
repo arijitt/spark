@@ -15,7 +15,7 @@
 #
 # Helper methods used elsewhere
 
-Function run-with-retry
+Function Run-With-Retry
 {
   param 
   ( [Parameter(Mandatory=$true)] [string]$command,
@@ -59,18 +59,18 @@ Function run-with-retry
   $commandOutput
 }
 
-Function get-available-port() 
+Function Get-Available-Port() 
 { 
   $SessionManagerEndpoint = $Env:SESSION_MANAGER_ENDPOINT
   $GetURL = "${SessionManagerEndpoint}/session-manager/v1/open-port"
   
-  $portNumber = run-with-retry -command 'Invoke-WebRequest' -argument @{ URI=$GetURL; UseBasicParsing=$true; Method="GET"}
+  $portNumber = Run-With-Retry -command 'Invoke-WebRequest' -argument @{ URI=$GetURL; UseBasicParsing=$true; Method="GET"}
   Write-Host "Got open port $portNumber from $GetURL."
 
   $portNumber
 }
 
-Function get-host-ipv4-address()
+Function Get-Host-IPV4-Address()
 {
   $ipv4Address = & nslookup -type=A $env:COMPUTERNAME | select -Skip 4 -First 1 | % { $_.Split(':')[1].Trim() }
   $ipv4Address
