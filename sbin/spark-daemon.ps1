@@ -222,7 +222,7 @@ Function Run-Command()
   if (-not (Test-Path env:SPARK_HOME)) 
   { 
     $SPARK_HOME=(Get-Item $PSScriptRoot).Parent.FullName
-    [Environment]::SetEnvironmentVariable("SPARK_HOME", "$SPARK_HOME", "Machine")  
+    [Environment]::SetEnvironmentVariable("SPARK_HOME", "$SPARK_HOME", "Process")
   } 
   else { $SPARK_HOME = $env:SPARK_HOME }
 
@@ -272,7 +272,7 @@ if ($configDirectoryPath)
   {
     Write-Host "Setting SPARK_CONF_DIR to $configDirectoryPath"
 
-    [Environment]::SetEnvironmentVariable("SPARK_CONF_DIR", "$configDirectoryPath", "Machine") 
+    [Environment]::SetEnvironmentVariable("SPARK_CONF_DIR", "$configDirectoryPath", "Process")
   }
 }
   
